@@ -5,6 +5,7 @@ import asyncio
 import logging
 import secrets
 import string
+import threading
 from datetime import datetime, timezone, timedelta
 
 import requests
@@ -13,6 +14,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters
 )
+from flask import Flask
 
 # ---------- CONFIG ----------
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -24,6 +26,7 @@ JITLER_BASE_URL = os.environ.get("JITLER_BASE_URL", "https://api.jitler.top")
 VALID_SEARCH_TYPES = ("number", "vks", "sherlock")
 VALID_DURATIONS = (1, 3, 7, 30, 90, 180, 365)
 
+
 # ---------- STORAGE ----------
 def load_data():
     if not os.path.exists(DATA_FILE):
@@ -34,6 +37,7 @@ def load_data():
     except Exception:
         return {"keys": {}}
 
+
 def save_data(data):
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -41,14 +45,17 @@ def save_data(data):
     except Exception as e:
         logging.error("save_data error: %s", e)
 
+
 def now_utc():
     return datetime.now(timezone.utc)
+
 
 # ---------- LICENSE ----------
 def generate_key():
     def block():
         return "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(5))
     return f"CLV-{block()}-{block()}-{block()}-{block()}"
+
 
 def create_license(days):
     data = load_data()
@@ -68,6 +75,7 @@ def create_license(days):
     }
     save_data(data)
     return data["keys"][key]
+
 
 def check_and_activate(key, user_id):
     data = load_data()
@@ -93,9 +101,11 @@ def check_and_activate(key, user_id):
     return {"ok": True, "status": "ACTIVE", "expires_at": lic["expires_at"],
             "remaining_seconds": int((exp - now_utc()).total_seconds())}
 
+
 def has_active(uid):
     data = load_data()
     return any(v.get("bound_to") == uid and v.get("status") == "ACTIVE" for v in data["keys"].values())
+
 
 # ---------- API ----------
 def search_request(search_type, query, page=1):
@@ -133,7 +143,8 @@ def search_request(search_type, query, page=1):
             except Exception as e:
                 return {"error": "NETWORK_ERROR", "detail": str(e)}
             if r2.status_code == 501:
-                time.sleep(3); continue
+                time.sleep(3)
+                continue
             if r2.status_code != 200:
                 return {"error": "API_ERROR"}
             try:
@@ -146,9 +157,27 @@ def search_request(search_type, query, page=1):
         return {"error": "API_TIMEOUT"}
     return {"data": result.get("response", [])}
 
+
+def get_me():
+    if not JITLER_API_KEY:
+        return {"error": "API_KEY_MISSING"}
+    try:
+        r = requests.get(f"{JITLER_BASE_URL}/me",
+                         headers={"Authorization": f"Bearer {JITLER_API_KEY}"}, timeout=10)
+    except Exception as e:
+        return {"error": "NETWORK_ERROR", "detail": str(e)}
+    if r.status_code != 200:
+        return {"error": "API_ERROR", "status_code": r.status_code}
+    try:
+        return {"data": r.json()}
+    except Exception:
+        return {"error": "INVALID_API_RESPONSE"}
+
+
 # ---------- HELPERS ----------
 def is_admin(uid):
     return uid in ADMIN_IDS
+
 
 # ---------- HANDLERS ----------
 async def cmd_start(update, context):
@@ -164,11 +193,19 @@ async def cmd_start(update, context):
         "/help — көмек"
     )
     if is_admin(uid):
-        text += "\n\n👑 <b>Админ:</b>\n/genkey &lt;күн&gt;\n/listkeys\n/delkey &lt;кілт&gt;\n/stats"
+        text += (
+            "\n\n👑 <b>Админ командалар:</b>\n"
+            "/genkey &lt;күн&gt; — кілт жасау\n"
+            "/listkeys — барлық кілттер\n"
+            "/delkey &lt;кілт&gt; — кілтті өшіру\n"
+            "/stats — статистика"
+        )
     await update.message.reply_html(text)
+
 
 async def cmd_help(update, context):
     await cmd_start(update, context)
+
 
 async def cmd_activate(update, context):
     uid = update.effective_user.id
@@ -186,8 +223,10 @@ async def cmd_activate(update, context):
         )
     else:
         await update.message.reply_html(
-            f"❌ <b>Қате:</b> {result.get('error', 'Жарамсыз')}\nСтатус: {result.get('status')}"
+            f"❌ <b>Қате:</b> {result.get('error', 'Жарамсыз')}\n"
+            f"Статус: {result.get('status')}"
         )
+
 
 async def cmd_me(update, context):
     uid = update.effective_user.id
@@ -205,6 +244,7 @@ async def cmd_me(update, context):
         lines.append(f"🔑 <code>{k}</code>\n⏳ Қалды: {d} күн {h} сағат\n")
     await update.message.reply_html("\n".join(lines))
 
+
 async def cmd_search(update, context):
     uid = update.effective_user.id
     if not has_active(uid):
@@ -217,6 +257,7 @@ async def cmd_search(update, context):
     ]
     await update.message.reply_text("🔍 Іздеу түрін таңдаңыз:", reply_markup=InlineKeyboardMarkup(kb))
 
+
 async def on_search_type(update, context):
     q = update.callback_query
     await q.answer()
@@ -226,6 +267,7 @@ async def on_search_type(update, context):
         f"Түрі: <b>{stype.upper()}</b>\n\nЕнді сұранысты жазыңыз:",
         parse_mode="HTML"
     )
+
 
 async def on_text(update, context):
     uid = update.effective_user.id
@@ -250,12 +292,17 @@ async def on_text(update, context):
         text = text[:3800] + "\n...(қысқартылды)"
     await msg.edit_text(f"✅ <b>Нәтиже:</b>\n<pre>{text}</pre>", parse_mode="HTML")
 
+
 # ---------- ADMIN ----------
 async def cmd_genkey(update, context):
     uid = update.effective_user.id
-    if not is_admin(uid): return
+    if not is_admin(uid):
+        return
     if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text(f"❌ /genkey <күн>\nМысалы: /genkey 30\n\nҚолжетімді: {', '.join(map(str, VALID_DURATIONS))}")
+        await update.message.reply_text(
+            f"❌ /genkey <күн>\nМысалы: /genkey 30\n\n"
+            f"Қолжетімді: {', '.join(map(str, VALID_DURATIONS))}"
+        )
         return
     days = int(context.args[0])
     if days not in VALID_DURATIONS:
@@ -269,9 +316,11 @@ async def cmd_genkey(update, context):
         f"⏰ {datetime.fromisoformat(lic['expires_at']).strftime('%Y-%m-%d %H:%M UTC')}"
     )
 
+
 async def cmd_listkeys(update, context):
     uid = update.effective_user.id
-    if not is_admin(uid): return
+    if not is_admin(uid):
+        return
     data = load_data()
     keys = list(data["keys"].values())
     if not keys:
@@ -280,8 +329,10 @@ async def cmd_listkeys(update, context):
     changed = False
     for k in keys:
         if k["status"] == "ACTIVE" and now_utc() > datetime.fromisoformat(k["expires_at"]):
-            k["status"] = "EXPIRED"; changed = True
-    if changed: save_data(data)
+            k["status"] = "EXPIRED"
+            changed = True
+    if changed:
+        save_data(data)
     lines = [f"📋 <b>Барлығы: {len(keys)}</b>\n"]
     for k in keys[:30]:
         e = {"UNUSED": "🟡", "ACTIVE": "🟢", "EXPIRED": "🔴", "REVOKED": "⚫"}.get(k["status"], "⚪")
@@ -290,23 +341,28 @@ async def cmd_listkeys(update, context):
         lines.append(f"\n...тағы {len(keys)-30}")
     await update.message.reply_html("\n".join(lines))
 
+
 async def cmd_delkey(update, context):
     uid = update.effective_user.id
-    if not is_admin(uid): return
+    if not is_admin(uid):
+        return
     if not context.args:
         await update.message.reply_text("❌ /delkey CLV-...")
         return
     key = context.args[0].strip().upper()
     data = load_data()
     if key in data["keys"]:
-        del data["keys"][key]; save_data(data)
+        del data["keys"][key]
+        save_data(data)
         await update.message.reply_text(f"✅ Өшірілді: {key}")
     else:
         await update.message.reply_text("❌ Табылмады.")
 
+
 async def cmd_stats(update, context):
     uid = update.effective_user.id
-    if not is_admin(uid): return
+    if not is_admin(uid):
+        return
     keys = load_data()["keys"].values()
     c = {"UNUSED": 0, "ACTIVE": 0, "EXPIRED": 0, "REVOKED": 0}
     for k in keys:
@@ -320,13 +376,10 @@ async def cmd_stats(update, context):
         f"📦 Барлығы: {sum(c.values())}"
     )
 
-# ---------- MAIN ----------
-def main():
-    logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s")
-    if not BOT_TOKEN:
-        logging.error("BOT_TOKEN жоқ!"); return
-    if not ADMIN_IDS:
-        logging.error("ADMIN_IDS жоқ!"); return
+
+# ---------- BOT + WEB ----------
+def run_bot():
+    """Telegram bot — жеке ағында."""
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
@@ -339,8 +392,42 @@ def main():
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CallbackQueryHandler(on_search_type, pattern="^st:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-    logging.info("Bot started")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    logging.info("✅ Telegram bot started")
+    app.run_polling(allowed_updates=Update.ALL_TYPES, stop_signals=None)
+
+
+# Flask — Render порт талап етеді
+web = Flask(__name__)
+
+
+@web.route("/")
+def health():
+    return "CLOVISS BOT is running", 200
+
+
+@web.route("/health")
+def health2():
+    return {"ok": True, "service": "CLOVISS BOT"}, 200
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s")
+    if not BOT_TOKEN:
+        logging.error("❌ BOT_TOKEN жоқ!")
+        return
+    if not ADMIN_IDS:
+        logging.error("❌ ADMIN_IDS жоқ!")
+        return
+
+    # Ботты жеке ағында қосамыз
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+
+    # Render тегін тариф үшін порт ашып тұрамыз
+    port = int(os.environ.get("PORT", 10000))
+    logging.info("🌐 Web server on port %s", port)
+    web.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
 
 if __name__ == "__main__":
     main()
