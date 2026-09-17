@@ -377,9 +377,9 @@ async def cmd_stats(update, context):
     )
 
 
-# ---------- BOT + WEB ----------
+# ---------- BOT (негізгі ағында) ----------
 def run_bot():
-    """Telegram bot — жеке ағында."""
+    """Telegram bot — НЕГІЗГІ ағында іске қосылады (asyncio үшін)."""
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
@@ -396,7 +396,7 @@ def run_bot():
     app.run_polling(allowed_updates=Update.ALL_TYPES, stop_signals=None)
 
 
-# Flask — Render порт талап етеді
+# ---------- FLASK (жеке ағында) ----------
 web = Flask(__name__)
 
 
@@ -410,6 +410,14 @@ def health2():
     return {"ok": True, "service": "CLOVISS BOT"}, 200
 
 
+def run_flask():
+    """Flask — жеке ағында, Render порт талап етеді."""
+    port = int(os.environ.get("PORT", 10000))
+    logging.info("🌐 Web server on port %s", port)
+    web.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+
+# ---------- MAIN ----------
 def main():
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s")
     if not BOT_TOKEN:
@@ -419,14 +427,12 @@ def main():
         logging.error("❌ ADMIN_IDS жоқ!")
         return
 
-    # Ботты жеке ағында қосамыз
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
+    # Flask-ты жеке ағында қосамыз (Render үшін порт керек)
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
 
-    # Render тегін тариф үшін порт ашып тұрамыз
-    port = int(os.environ.get("PORT", 10000))
-    logging.info("🌐 Web server on port %s", port)
-    web.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    # Ботты НЕГІЗГІ ағында қосамыз (asyncio осылай талап етеді)
+    run_bot()
 
 
 if __name__ == "__main__":
